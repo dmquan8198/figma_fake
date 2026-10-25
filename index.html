@@ -1579,6 +1579,7 @@ function render(o={}){
   fixOrder();
   applyBindings();
   relayoutAll();
+  snapBinds();
   const wt=`translate(${view.x}px,${view.y}px) scale(${view.z})`;
   if(world.style.transform!==wt)world.style.transform=wt;
   renderWorld();
@@ -4459,16 +4460,46 @@ function bindApply(o,modes){
   });
   return ch;
 }
+/* đọc giá trị hiện tại của một thuộc tính có thể gắn biến */
+function bindRead(o,p){
+  switch(p){
+    case 'fill':return String(o.fill||'').toUpperCase()+(o.grad?'|g':'')+(o.fsid?'|s':'');
+    case 'stroke':return String(o.stroke||'').toUpperCase();
+    case 'r':return o.rr?JSON.stringify(o.rr):o.r;
+    case 'gap':case 'px':case 'py':return o.lay?o.lay[p]:undefined;
+    case 'text':return o.text+(o.rt?'|rt':'');
+    case 'visible':return !o.hidden;
+  }
+  if(/^gs\d+$/.test(p)){const st=o.grad&&o.grad.s[+p.slice(2)];return st?String(st[1]).toUpperCase():undefined}
+  return o[p];
+}
+/* ghi nhớ giá trị biến vừa áp (gọi cuối mỗi lần vẽ) để nhận ra khi người dùng sửa tay */
+function snapBinds(){
+  objs.forEach(o=>{
+    if(!o.bind){o._bv=null;return}
+    const m={};Object.keys(o.bind).forEach(p=>{m[p]=bindRead(o,p)});o._bv=m;
+  });
+}
 function applyBindings(){
   if(!doc.vars.cols.length)return;
-  objs.forEach(o=>{if(o.bind)bindApply(o,modesOf(o))});
+  objs.forEach(o=>{
+    if(!o.bind)return;
+    // người dùng đã sửa tay thuộc tính đang gắn biến (kéo, gõ, phím tắt…): giữ giá trị tay, gỡ biến như Figma
+    if(o._bv)Object.keys(o.bind).forEach(p=>{
+      if(p in o._bv&&bindRead(o,p)!==o._bv[p])delete o.bind[p];
+    });
+    if(!Object.keys(o.bind).length){o.bind=null;return}
+    bindApply(o,modesOf(o));
+  });
 }
 function bindName(o,prop){
   const id=o.bind&&o.bind[prop];if(!id)return null;
   const f=findVar(id);return f?f.v.name:'(biến đã xoá)';
 }
+/* mọi lớp của mọi trang (trang hiện tại dùng mảng đang sửa) */
+const everyObj=()=>[...objs,...doc.pages.filter(p=>p!==curPage()).flatMap(p=>p.objs)];
 function cleanBinds(pred){
-  objs.forEach(o=>{if(o.bind){Object.keys(o.bind).forEach(k=>{if(pred(o.bind[k]))delete o.bind[k]});if(!Object.keys(o.bind).length)o.bind=null}});
+  everyObj().forEach(o=>{if(o.bind){Object.keys(o.bind).forEach(k=>{if(pred(o.bind[k]))delete o.bind[k]});if(!Object.keys(o.bind).length)o.bind=null}});
 }
 
 /* ---------- gắn biến vào thuộc tính ---------- */
@@ -4660,7 +4691,7 @@ $('#mbody').addEventListener('click',e=>{
     pushHistory();
     const c=col(arg),ids=new Set(c.vars.map(v=>v.id));
     cleanBinds(id=>ids.has(id));
-    objs.forEach(o=>{if(o.vm){delete o.vm[arg];if(!Object.keys(o.vm).length)o.vm=null}});
+    everyObj().forEach(o=>{if(o.vm){delete o.vm[arg];if(!Object.keys(o.vm).length)o.vm=null}});
     doc.vars.cols=doc.vars.cols.filter(x=>x!==c);
     vcur=doc.vars.cols[0]?doc.vars.cols[0].id:null;
     if(!doc.vars.cols.length)doc.vars.cols.push(newCol('Bộ biến 1')),vcur=doc.vars.cols[0].id;
@@ -4678,7 +4709,7 @@ $('#mbody').addEventListener('click',e=>{
     cl.modes=cl.modes.filter(x=>x.id!==m);
     cl.vars.forEach(v=>{delete v.vals[m]});
     if(cl.def===m)cl.def=cl.modes[0].id;
-    objs.forEach(o=>{if(o.vm&&o.vm[c]===m){delete o.vm[c];if(!Object.keys(o.vm).length)o.vm=null}});
+    everyObj().forEach(o=>{if(o.vm&&o.vm[c]===m){delete o.vm[c];if(!Object.keys(o.vm).length)o.vm=null}});
     refreshVarsModal();render();return;
   }
   if(a==='addvar'){
@@ -4885,8 +4916,8 @@ window.addEventListener('keydown',e=>{
     return;
   }
   if(e.key==='Escape'){
-    if(!$('#modal').hidden){closeModal();return}
     if(!pop.hidden){hidePop();return}
+    if(!$('#modal').hidden){closeModal();return}
     if(typing){tg.blur();return}
     if(vedit){exitVedit();return}
     if(pen){penFinish();return}
