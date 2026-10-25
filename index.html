@@ -742,12 +742,15 @@ function hitShape(o,p,tol){
 
 /* ---------- lịch sử, trang, lưu ---------- */
 const jrep=(k,v)=>k[0]==='_'?undefined:v;
-const snap=()=>JSON.stringify({o:objs,s:doc.styles,v:doc.vars},jrep);
+// pg: trạng thái các trang khác bị đụng tới trong cùng bước (ví dụ chuyển lớp sang trang khác)
+const snap=pgIds=>JSON.stringify(pgIds&&pgIds.length?{o:objs,s:doc.styles,v:doc.vars,pg:Object.fromEntries(pgIds.map(id=>[id,(doc.pages.find(p=>p.id===id)||{objs:[]}).objs]))}:{o:objs,s:doc.styles,v:doc.vars},jrep);
+const snapPg=s=>{if(s.lastIndexOf('"pg":{')<0)return null;try{const d=JSON.parse(s);return d.pg?Object.keys(d.pg):null}catch(_){return null}};
 function syncHist(){$('#undo').disabled=!undoS.length;$('#redo').disabled=!redoS.length}
 function pushHistory(){undoS.push(snap());if(undoS.length>100)undoS.shift();redoS=[];syncHist()}
 function restore(s){
   const d=JSON.parse(s);
   objs=d.o.map(normalizeObj);doc.styles=d.s;if(d.v)doc.vars=d.v;
+  if(d.pg)Object.entries(d.pg).forEach(([id,list])=>{const p=doc.pages.find(q=>q.id===id);if(p&&p!==curPage())p.objs=list.map(normalizeObj)});
   sel=new Set([...sel].filter(id=>byId(id)));
   if(editing){editing=null;te.hidden=true}
   // hoàn tác trong chế độ sửa nút: ở lại chế độ sửa nếu lớp vẫn là path
@@ -755,8 +758,8 @@ function restore(s){
   pen=null;
   render();
 }
-function doUndo(){if(!undoS.length)return;redoS.push(snap());restore(undoS.pop());syncHist()}
-function doRedo(){if(!redoS.length)return;undoS.push(snap());restore(redoS.pop());syncHist()}
+function doUndo(){if(!undoS.length)return;const u=undoS.pop();redoS.push(snap(snapPg(u)));restore(u);syncHist()}
+function doRedo(){if(!redoS.length)return;const r=redoS.pop();undoS.push(snap(snapPg(r)));restore(r);syncHist()}
 const curPage=()=>doc.pages[doc.cur];
 function newPage(name){return {id:uid(),name,objs:[],guides:[],view:{x:0,y:0,z:1},start:null,undo:[],redo:[]}}
 function syncPageOut(){const p=curPage();if(!p)return;p.objs=objs;p.guides=guides;p.view=view;p.undo=undoS;p.redo=redoS}
@@ -1112,7 +1115,10 @@ function wrapFrame(S,props){
   const T=topsOf(S),B=union(T);
   const P=T.every(o=>o.parent===T[0].parent)?T[0].parent:null;
   const f=mk('frame',{x:B.x,y:B.y,w:Math.max(1,B.w),h:Math.max(1,B.h),fill:'',parent:P,...props});
-  objs.splice(Math.min(...T.map(o=>objs.indexOf(o))),0,f);
+  // như Figma: nhóm nằm ở vị trí của lớp cao nhất trong vùng chọn, các lớp khác giữ nguyên chỗ
+  const hiTop=T.reduce((a,o)=>objs.indexOf(o)>objs.indexOf(a)?o:a,T[0]);
+  const st=subtree(hiTop);
+  objs.splice((st.length?objs.indexOf(st[st.length-1]):objs.indexOf(hiTop))+1,0,f);
   T.forEach(c=>{c.parent=f.id});
   return f;
 }
@@ -2956,6 +2962,7 @@ function renderComps(){
   });
   cmpsEl.innerHTML=h;
 }
+let laySelKey='';
 function renderLayerList(){
   layHd.innerHTML=`<span>Lớp</span><span class="cnt">${objs.length}</span>`;
   // mở các khung chứa đối tượng đang chọn
@@ -2979,6 +2986,9 @@ function renderLayerList(){
     [...roots].reverse().forEach(o=>walk(o,0));
   }
   layList.innerHTML=h;
+  const key=[...sel].join(',');
+  if(key&&key!==laySelKey){const r=layList.querySelector('.row.on');if(r)r.scrollIntoView({block:'nearest'})}
+  laySelKey=key;
 }
 function renderLayers(){renderPages();renderComps();renderLayerList()}
 lq.addEventListener('input',()=>{layerQuery=lq.value.trim();renderLayerList()});
@@ -3030,23 +3040,50 @@ layList.addEventListener('click',e=>{
   const o=byId(r.dataset.id);if(!o)return;
   const b=e.target.closest('[data-lyr]');
   if(b){pushHistory();if(b.dataset.lyr==='eye'){o.hidden=!o.hidden;if(o.bind&&o.bind.visible){delete o.bind.visible;if(!Object.keys(o.bind).length)o.bind=null;toast('Đã gỡ biến hiển thị khỏi lớp này vì bạn bật/tắt thủ công.')}if(o.cp&&o.cp.vis)syncChildToProp(o)}else o.locked=!o.locked;render();return}
-  if(e.shiftKey||e.metaKey||e.ctrlKey){sel.has(o.id)?sel.delete(o.id):sel.add(o.id)}else sel=new Set([o.id]);
+  // nhấp đúp tự nhận: lần nhấp đầu vẽ lại danh sách nên sự kiện dblclick của trình duyệt bị mất
+  const now=performance.now(),dbl=layClick&&layClick.id===o.id&&now-layClick.t<450&&e.target.closest('.nm');
+  layClick={id:o.id,t:now};
+  if(dbl&&!e.shiftKey&&!e.metaKey&&!e.ctrlKey){layClick=null;startRename(o.id);return}
+  if(e.shiftKey&&layAnchor&&byId(layAnchor)){
+    // Shift: chọn cả dải dòng từ dòng neo tới dòng này, như Figma
+    const rows=[...layList.querySelectorAll('.row[data-id]')].map(x=>x.dataset.id);
+    let i=rows.indexOf(layAnchor),j=rows.indexOf(o.id);
+    if(i<0)i=j;
+    const [lo,hi]=i<j?[i,j]:[j,i];
+    sel=new Set(rows.slice(lo,hi+1));
+  }else if(e.metaKey||e.ctrlKey){sel.has(o.id)?sel.delete(o.id):sel.add(o.id);layAnchor=o.id}
+  else{sel=new Set([o.id]);layAnchor=o.id}
   render();
 });
-layList.addEventListener('dblclick',e=>{
-  const nm=e.target.closest('.nm');if(!nm)return;
-  const r=nm.closest('.row'),o=byId(r.dataset.id);if(!o)return;
+let layClick=null,layAnchor=null;
+/* đổi tên ngay trên dòng; chọn nhiều lớp thì đổi tên tất cả */
+function startRename(id){
+  const r=layList.querySelector(`.row[data-id="${id}"]`),o=byId(id);if(!r||!o)return;
+  const nm=r.querySelector('.nm');if(!nm)return;
+  const targets=sel.has(id)&&sel.size>1?selObjs():[o];
   const inp=document.createElement('input');inp.value=layerName(o);
   nm.replaceWith(inp);inp.focus();inp.select();
   let done=false;
   const fin=ok=>{
     if(done)return;done=true;
-    if(ok&&inp.value.trim()&&inp.value.trim()!==layerName(o)){pushHistory();o.name=inp.value.trim()}
+    const v=inp.value.trim();
+    if(ok&&v&&targets.some(t=>layerName(t)!==v)){pushHistory();targets.forEach(t=>{t.name=v})}
     render();
   };
   inp.addEventListener('blur',()=>fin(true));
   inp.addEventListener('keydown',ev=>{ev.stopPropagation();if(ev.key==='Enter')fin(true);if(ev.key==='Escape')fin(false)});
+}
+layList.addEventListener('dblclick',e=>{
+  const nm=e.target.closest('.nm');if(!nm)return;
+  const r=nm.closest('.row');if(!r||!byId(r.dataset.id))return;
+  layClick=null;startRename(r.dataset.id);
 });
+/* di chuột lên dòng: viền sáng lớp đó trên canvas */
+layList.addEventListener('mouseover',e=>{
+  const r=e.target.closest('.row[data-id]');const id=r?r.dataset.id:null;
+  if(id!==hover){hover=id;drawOverlay()}
+});
+layList.addEventListener('mouseleave',()=>{if(hover){hover=null;drawOverlay()}});
 /* kéo thả để sắp xếp và đưa vào khung */
 let dnd=null;
 function clearDt(){layList.querySelectorAll('.dt-b,.dt-a,.dt-i').forEach(r=>r.classList.remove('dt-b','dt-a','dt-i'))}
@@ -3081,6 +3118,9 @@ function moveLayers(ids,tid,zone){
   if(!moving.length)return;
   const blockIds=new Set(withChildren(moving).map(o=>o.id));
   if(blockIds.has(tid))return;
+  const np=zone==='i'?target:(target.parent?byId(target.parent):null);
+  if(moving.some(m=>m.sec)&&np&&!np.sec){toast('Section chỉ nằm ở cấp trang hoặc trong Section khác');return}
+  if(np&&np.type==='inst'&&!(zone!=='i'&&target.slot)){toast('Không thả vào bên trong bản sao component');return}
   pushHistory();
   const block=objs.filter(o=>blockIds.has(o.id));
   objs=objs.filter(o=>!blockIds.has(o.id));
@@ -3089,7 +3129,7 @@ function moveLayers(ids,tid,zone){
     moving.forEach(m=>{m.parent=target.id});
     const sub=subtree(target);idx=(sub.length?objs.indexOf(sub[sub.length-1]):objs.indexOf(target))+1;
   }else{
-    moving.forEach(m=>{m.parent=target.parent});
+    moving.forEach(m=>{m.parent=target.parent;m.slot=target.slot||null});
     if(zone==='b'){const sub=subtree(target);idx=(sub.length?objs.indexOf(sub[sub.length-1]):objs.indexOf(target))+1}
     else idx=objs.indexOf(target);
   }
@@ -3641,16 +3681,34 @@ function detachOtherPages(ids){
   });
   doc.cur=keep;objs=curPage().objs;
 }
+let lastDup=null;
+// chèn từng khối bản sao ngay trên khối gốc của nó (cùng cha), như Figma
+function insertAbove(pairs){
+  pairs.forEach(({src,block})=>{
+    const st=subtree(src),at=(st.length?objs.indexOf(st[st.length-1]):objs.indexOf(src))+1;
+    objs.splice(at,0,...block);
+  });
+}
 function dupSel(){
   const S=selObjs();if(!S.length)return;
   pushHistory();
-  const cl=cloneSet(withChildren(S),0,0);
-  const tops=topsOf(cl);
-  const gap=tops.length===1&&tops[0].type==='frame'&&!tops[0].parent?tops[0].w+60:20;
-  cl.forEach(c=>{c.x+=gap;c.y+=gap===20?20:0});
-  cl.forEach(c=>objs.push(c));
-  settleParents(tops);
-  sel=new Set(tops.map(c=>c.id));render();
+  const T=topsOf(S);
+  let ox,oy;
+  // nhân đôi thông minh: vừa nhân đôi rồi dời bản sao, Ctrl+D tiếp sẽ lặp lại đúng khoảng dời
+  const ld=lastDup&&lastDup.dup.length===T.length&&T.every(o=>lastDup.dup.includes(o.id))&&byId(lastDup.src[0])?lastDup:null;
+  if(ld){const a=byId(ld.src[0]),b=byId(ld.dup[0]);ox=b.x-a.x;oy=b.y-a.y}
+  else{
+    const frameTop=T.length===1&&T[0].type==='frame'&&!T[0].parent;
+    ox=frameTop?T[0].w+60:20;oy=frameTop?0:20;
+  }
+  const pairs=T.map(o=>{const cl=cloneSet([o,...subtree(o)],ox,oy);return {src:o,block:cl,top:cl[0]}});
+  insertAbove(pairs);
+  // khung cha auto layout xếp lại; còn lại giữ cùng cha với bản gốc
+  pairs.forEach(({src,top})=>{if(!src.parent)assignParent(top)});
+  const fs=new Set(pairs.map(q=>q.top.parent).filter(Boolean));
+  fs.forEach(id=>{const f=byId(id);if(f&&f.lay)reorderKids(f)});
+  lastDup={src:T.map(o=>o.id),dup:pairs.map(q=>q.top.id)};
+  sel=new Set(pairs.map(q=>q.top.id));render();
 }
 function copySel(){
   const S=selObjs();if(!S.length)return;
@@ -3658,15 +3716,36 @@ function copySel(){
   const imgs={};clip.forEach(o=>{if(o.src&&doc.images[o.src])imgs[o.src]=doc.images[o.src]});
   clip._imgs=imgs;
 }
-function pasteSel(inPlace){
+function pasteSel(inPlace,at){
   if(!clip.length)return;
   pushHistory();pasteN++;
   if(clip._imgs)Object.assign(doc.images,clip._imgs);
-  const off=inPlace?0:20*pasteN;
-  const cl=cloneSet(clip,off,off);
-  cl.forEach(c=>objs.push(c));
+  const srcIds=new Set(clip.map(o=>o.id));
+  const S=selObjs(),one=S.length===1?S[0]:null;
+  // như Figma: đang chọn một khung (không phải chính thứ vừa sao chép) thì dán vào trong khung đó
+  const into=one&&one.type==='frame'&&!srcIds.has(one.id)&&!withChildren([one]).some(o=>srcIds.has(o.id))?one:null;
+  const B=union(topsOf(clip));
+  let ox,oy;
+  if(at){ox=at.x-B.x;oy=at.y-B.y}
+  else if(into){
+    const fits=B.x>=into.x&&B.y>=into.y&&B.x+B.w<=into.x+into.w&&B.y+B.h<=into.y+into.h;
+    if(fits){ox=0;oy=0}else{ox=into.x+(into.w-B.w)/2-B.x;oy=into.y+(into.h-B.h)/2-B.y}
+  }else{ox=inPlace?0:20*pasteN;oy=ox}
+  const cl=cloneSet(clip,ox,oy);
   const tops=topsOf(cl);
-  settleParents(tops);
+  if(into){
+    tops.forEach(t=>{t.parent=into.id});
+    const st=subtree(into);objs.splice((st.length?objs.indexOf(st[st.length-1]):objs.indexOf(into))+1,0,...cl);
+    if(into.lay)reorderKids(into);
+  }else if(one&&!at){
+    // dán ngay trên lớp đang chọn, cùng cha
+    tops.forEach(t=>{t.parent=one.parent||null});
+    insertAbove([{src:one,block:cl}]);
+    const p=one.parent&&byId(one.parent);if(p&&p.lay)reorderKids(p);
+  }else{
+    cl.forEach(c=>objs.push(c));
+    settleParents(tops);
+  }
   sel=new Set(tops.map(c=>c.id));render();
 }
 function groupSel(label){
@@ -3745,9 +3824,11 @@ function pasteProps(){
   render();
 }
 function renameSel(){
-  const o=selObjs()[0];if(!o)return;
-  const el=layList.querySelector(`.row[data-id="${o.id}"] .nm`);
-  if(el)el.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));
+  const S=selObjs();if(!S.length)return;
+  // lớp trên cùng trong danh sách là dòng hiện ô đổi tên
+  const rows=[...layList.querySelectorAll('.row[data-id]')].map(r=>r.dataset.id);
+  const id=rows.find(x=>sel.has(x))||S[0].id;
+  startRename(id);
 }
 function selectSibling(dir){
   const S=selObjs(),hid=hiddenIds();
@@ -4520,6 +4601,68 @@ function docJson(){
   return JSON.stringify({v:2,cur:doc.cur,styles:doc.styles,images:doc.images,vars:doc.vars,pages:doc.pages.map(p=>({id:p.id,name:p.name,objs:p.objs,guides:p.guides,view:p.view,start:p.start}))},jrep);
 }
 
+/* ---------- menu chuột phải (canvas và bảng Lớp) ---------- */
+function moveToPage(pi){
+  const S=selObjs();const tp=doc.pages[pi];
+  if(!S.length||!tp||pi===doc.cur)return;
+  endAllModes();
+  undoS.push(snap([tp.id]));if(undoS.length>100)undoS.shift();redoS=[];syncHist();
+  const T=topsOf(S),block=withChildren(T),ids=new Set(block.map(o=>o.id));
+  const moved=JSON.parse(JSON.stringify(block,jrep)).map(normalizeObj);
+  moved.forEach(o=>{if(ids.has(o.id)&&T.some(t=>t.id===o.id))o.parent=null});
+  // component đi sang trang mới: bản sao ở trang này vẫn trỏ được tới nó (refMaster tìm trên mọi trang)
+  tp.objs=tp.objs.concat(moved);
+  objs=objs.filter(o=>!ids.has(o.id));sel=new Set();
+  render();
+  toast(`Đã chuyển ${T.length} lớp sang "${tp.name}"`);
+}
+function ctxMenu(x,y,wp){
+  const S=selObjs(),n=S.length,one=n===1?S[0]:null;
+  const mk=(a,l,k='',dis=false)=>dis?'':popItem('ctx:'+a,l,k?`<kbd>${k}</kbd>`:'');
+  const sp='<div class="sp1"></div>';
+  let h='';
+  if(n){
+    h+=mk('copy','Sao chép','Ctrl C')+mk('paste','Dán','Ctrl V',!clip.length)+mk('dup','Nhân đôi','Ctrl D')+mk('del','Xoá','Del')+sp;
+    h+=mk('group','Nhóm lại','Ctrl G')+mk('ungroup','Rã nhóm','Ctrl Shift G',!S.some(o=>o.type==='frame'&&!o.comp))+mk('frame','Bọc trong Frame','Ctrl Alt G')+sp;
+    h+=mk('front','Đưa lên trên cùng','Ctrl ]')+mk('back','Đưa xuống dưới cùng','Ctrl [')+sp;
+    h+=mk('hide',S.every(o=>o.hidden)?'Hiện':'Ẩn','Ctrl Shift H')+mk('lock',S.every(o=>o.locked)?'Mở khoá':'Khoá','Ctrl Shift L')+mk('rename','Đổi tên','Ctrl R')+sp;
+    h+=mk('comp','Tạo component','Ctrl Alt K')+(S.some(o=>o.type==='inst')?mk('detach','Tách khỏi component','Ctrl Alt B'):'');
+    if(doc.pages.length>1)h+=`<button class="it" data-pa="ctx:movepage" data-keep="1">Chuyển sang trang<span style="margin-left:auto">›</span></button>`;
+    h+=sp+mk('copypng','Sao chép dạng PNG','Ctrl Shift C')+mk('export','Xuất…','Ctrl Shift E');
+  }else{
+    h+=mk('pastehere','Dán vào đây','',!clip.length)+mk('selall','Chọn tất cả','Ctrl A')+sp+mk('fit','Vừa khung nhìn','Shift 1');
+  }
+  const anchor={getBoundingClientRect:()=>({left:x,right:x,top:y,bottom:y,width:0,height:0}),contains:()=>false};
+  showPop(anchor,h,(a,it)=>{
+    const c=a.slice(4);
+    if(c==='movepage'){
+      pop.innerHTML=doc.pages.map((p,i)=>i===doc.cur?'':popItem('ctx:topage:'+i,esc(p.name))).join('');
+      return;
+    }
+    if(c.startsWith('topage:')){moveToPage(+c.slice(7));return}
+    ({copy:()=>{copySel();toast('Đã sao chép')},paste:()=>pasteSel(false),dup:dupSel,del:delSel,group:()=>groupSel('Group'),ungroup:ungroupSel,frame:()=>groupSel('Frame'),
+      front:()=>moveZ(1,true),back:()=>moveZ(-1,true),hide:()=>toggleFlag('hidden'),lock:()=>toggleFlag('locked'),rename:()=>setTimeout(renameSel,0),
+      comp:makeComponent,detach:detachSel,copypng:()=>copyPngOf(selObjs(),2),export:openExport,
+      pastehere:()=>{sel=new Set();pasteSel(false,wp)},selall:()=>{const hid=hiddenIds();sel=new Set(objs.filter(o=>!hid.has(o.id)&&!o.locked&&!o.parent).map(o=>o.id));render()},fit:()=>fitView()}[c]||(()=>{}))();
+  });
+}
+cv.addEventListener('contextmenu',e=>{
+  e.preventDefault();
+  if(pres||pen||vedit||editing)return;
+  const p=toWorld(e),id=hit(p);
+  // chuột phải lên lớp chưa chọn: chọn lớp đó trước (như Figma); lên vùng đang chọn thì giữ nguyên
+  if(id&&!sel.has(id))sel=new Set([id]);
+  else if(!id){const B=sel.size?union(selObjs()):null;if(!(B&&p.x>=B.x&&p.x<=B.x+B.w&&p.y>=B.y&&p.y<=B.y+B.h))sel=new Set()}
+  render();
+  ctxMenu(e.clientX,e.clientY,p);
+});
+layList.addEventListener('contextmenu',e=>{
+  const r=e.target.closest('.row[data-id]');if(!r)return;
+  e.preventDefault();
+  if(!sel.has(r.dataset.id)){sel=new Set([r.dataset.id]);layAnchor=r.dataset.id;render()}
+  ctxMenu(e.clientX,e.clientY,null);
+});
+
 /* ---------- menu tệp, zoom, giao diện ---------- */
 $('#menuBtn').innerHTML=ic('menu',17);
 $('#undo').innerHTML=ic('undo',17);$('#redo').innerHTML=ic('redo',17);
@@ -5268,7 +5411,12 @@ window.addEventListener('keydown',e=>{
     if(k==='z'&&pen&&!e.shiftKey){e.preventDefault();pen.nodes.pop();if(!pen.nodes.length)pen=null;drawOverlay();return}
     if(k==='z'){e.preventDefault();e.shiftKey?doRedo():doUndo()}
     else if(k==='y'){e.preventDefault();doRedo()}
-    else if(k==='a'){e.preventDefault();const hid=hiddenIds();sel=new Set(objs.filter(o=>!hid.has(o.id)&&!o.locked&&!o.parent).map(o=>o.id));render()}
+    else if(k==='a'){
+      e.preventDefault();const hid=hiddenIds();
+      // như Figma: chọn tất cả lớp cùng cấp với vùng chọn hiện tại
+      const S=selObjs(),par=S.length&&S.every(o=>(o.parent||'')===(S[0].parent||''))?(S[0].parent||''):'';
+      sel=new Set(objs.filter(o=>!hid.has(o.id)&&!o.locked&&(o.parent||'')===par&&(par||!o.parent||!byId(o.parent))).map(o=>o.id));render()
+    }
     else if(k==='c'){copySel()}
     else if(k==='x'){copySel();setTimeout(()=>{if(sel.size)delSel()},100)}
     else if(k==='v'){pendingPaste=true;setTimeout(()=>{if(pendingPaste){pendingPaste=false;pasteSel(e.shiftKey)}},90)}
@@ -5499,8 +5647,8 @@ async function boot(){
   window.__xvReady=true;
 }
 boot();
-window.__xv=()=>({objs,doc,view,sel:[...sel],guides,pen,vedit,rulersOn});
-window.__xvT={clearCache:()=>clearRootCache(),hist:()=>[undoS.length,redoS.length],select:ids=>{sel=new Set(ids);render()},undo:()=>doUndo(),redo:()=>doRedo(),snap:()=>snap(),fn:{svgToPngBlob,svgToBlob,embedFonts,visBounds,runExports,delSel,dupSel,groupSel,ungroupSel,addLayout,makeComponent,detachSel,createInstance,addVariant,switchVariant,boolOp,flattenSel,maskSel,flipSel,moveZ,align,distribute,pasteSel,copySel,toggleFlag,applyField,resizeBy,rotateTo,act,switchPage,newPage,exportData,figmaPayload,docJson,loadDoc,instLayout,refMaster,actVars,pushHistory,fixOrder},figma:()=>figmaPayload(null),render:()=>render(),mk,fit:()=>fitView(),add:o=>{objs.push(o)},clear:()=>{objs=[];sel=new Set()}};
+window.__xv=()=>({objs,doc,view,sel:[...sel],guides,pen,vedit,rulersOn,hover,collapsed:[...collapsed]});
+window.__xvT={clearCache:()=>clearRootCache(),hist:()=>[undoS.length,redoS.length],select:ids=>{sel=new Set(ids);render()},undo:()=>doUndo(),redo:()=>doRedo(),snap:()=>snap(),fn:{moveToPage,svgToPngBlob,svgToBlob,embedFonts,visBounds,runExports,delSel,dupSel,groupSel,ungroupSel,addLayout,makeComponent,detachSel,createInstance,addVariant,switchVariant,boolOp,flattenSel,maskSel,flipSel,moveZ,align,distribute,pasteSel,copySel,toggleFlag,applyField,resizeBy,rotateTo,act,switchPage,newPage,exportData,figmaPayload,docJson,loadDoc,instLayout,refMaster,actVars,pushHistory,fixOrder},figma:()=>figmaPayload(null),render:()=>render(),mk,fit:()=>fitView(),add:o=>{objs.push(o)},clear:()=>{objs=[];sel=new Set()}};
 
 
 })();
