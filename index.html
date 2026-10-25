@@ -1988,6 +1988,9 @@ function veditDown(e,p,ds){
 function onDown(e){
   e.preventDefault();
   if(editing)te.blur();
+  // nhấp lên canvas thì rời ô nhập liệu đang gõ dở, để phím tắt tác động lên bản vẽ
+  const ae=document.activeElement;
+  if(ae&&ae!==document.body&&ae!==te&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))ae.blur();
   try{cv.setPointerCapture(e.pointerId)}catch(_){}
   pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
   if(pointers.size===2){startPinch();return}
@@ -2332,7 +2335,37 @@ function handleDouble(e){
   if(!o)return false;
   if(o.type==='text'){sel=new Set([o.id]);render();editText(o,false);return true}
   if(['path','rect','ellipse','polygon','star','line','arrow'].includes(o.type)){sel=new Set([o.id]);enterVedit(o);return true}
+  if(o.type==='inst'){
+    // nhấp đúp lên chữ trong bản sao: chọn bản sao và đưa con trỏ vào đúng ô ghi đè chữ đó
+    const hitT=instTextAt(o,toLocal(o,toWorld(e)));
+    if(hitT){
+      sel=new Set([o.id]);rtab='design';render();
+      const q=hitT.pid?(hitT.path.length?`[data-k="${CSS.escape('ovp:'+JSON.stringify([hitT.path,hitT.pid]))}"]`:`[data-ip="${CSS.escape(hitT.pid)}"]`):`[data-k="${CSS.escape('ovt:'+JSON.stringify(hitT.path))}"]`;
+      const el=right.querySelector('textarea'+q);
+      if(el){right.classList.add('open');el.focus();el.select();el.scrollIntoView({block:'nearest'})}
+      return true;
+    }
+  }
   return false;
+}
+/* lớp chữ (kể cả trong bản sao lồng) nằm dưới điểm p của một bản sao */
+function instTextAt(inst,p,path=[],ox=inst.x,oy=inst.y,depth=0){
+  const m=refMaster(inst.ref);if(!m||depth>3)return null;
+  const keys=new Map(kidsOf(m).map(({c,key})=>[c.id,key]));
+  const r=instLayout(inst),list=r.list;
+  for(let j=list.length-1;j>0;j--){
+    const k=list[j];
+    if(k.hidden||k._real)continue;
+    const x=ox+k.x,y=oy+k.y;
+    if(p.x<x||p.x>x+k.w||p.y<y||p.y>y+k.h)continue;
+    const key=keys.get(k.id);if(!key)continue;
+    if(k.type==='text'){
+      if(k.cp&&k.cp.text)return {path,pid:k.cp.text};
+      return {path:[...path,key]};
+    }
+    if(k.type==='inst'){const r2=instTextAt(k,p,[...path,key],x,y,depth+1);if(r2)return r2}
+  }
+  return null;
 }
 function startPinch(){
   drag=null;
@@ -2534,8 +2567,10 @@ function domToRuns(root){
     if(n.nodeType!==1)return;
     const tag=n.tagName;
     if(tag==='BR'){
-      const p=n.parentNode;
-      const only=p!==root&&p.childNodes.length===1&&/^(DIV|P)$/.test(p.tagName);
+      // <br> giữ chỗ cho dòng trống (<div><br></div>, kể cả bọc trong <span>) không phải là một lần xuống dòng nữa
+      let p=n.parentNode,q=n;
+      while(p&&p!==root&&p.childNodes.length===1&&!/^(DIV|P)$/.test(p.tagName)){q=p;p=p.parentNode}
+      const only=p&&p!==root&&p.childNodes.length===1&&/^(DIV|P)$/.test(p.tagName);
       if(!only)push('\n',st);
       return;
     }
@@ -2614,6 +2649,10 @@ te.addEventListener('input',()=>{
   if(!editing)return;
   applyRunsToObj(editing,domToRuns(te));
   fitText(editing);
+  // chữ nằm trong auto layout: sắp lại khung ngay khi đang gõ
+  let q=editing.parent&&byId(editing.parent),inAL=false,n=0;
+  while(q&&n++<40){if(q.lay){inAL=true;break}q=q.parent&&byId(q.parent)}
+  if(inAL){render({noPanel:true});return}
   positionTE();drawOverlay();renderLayers();
 });
 te.addEventListener('paste',e=>{
