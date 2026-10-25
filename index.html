@@ -748,7 +748,9 @@ function restore(s){
   objs=d.o.map(normalizeObj);doc.styles=d.s;if(d.v)doc.vars=d.v;
   sel=new Set([...sel].filter(id=>byId(id)));
   if(editing){editing=null;te.hidden=true}
-  vedit=null;pen=null;
+  // hoàn tác trong chế độ sửa nút: ở lại chế độ sửa nếu lớp vẫn là path
+  if(vedit){const vo=byId(vedit.id);if(vo&&vo.type==='path'){vedit.sel=null;vedit.multi=[]}else vedit=null}
+  pen=null;
   render();
 }
 function doUndo(){if(!undoS.length)return;redoS.push(snap());restore(undoS.pop());syncHist()}
@@ -1763,11 +1765,12 @@ function drawOverlay(){
       h+=`<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.5" style="pointer-events:none"/>`;
       c.n.forEach((n,ni)=>{
         const on=vedit.sel&&vedit.sel.c===ci&&vedit.sel.i===ni;
+        const picked=on||(vedit.multi||[]).some(q=>q.c===ci&&q.i===ni);
         if(on){
           if(n.ix||n.iy)h+=`<line x1="${sx(n.x)}" y1="${sy(n.y)}" x2="${sx(n.x+n.ix)}" y2="${sy(n.y+n.iy)}" stroke="var(--accent)" stroke-width="1" style="pointer-events:none"/><circle data-vh="${ci}:${ni}:i" cx="${sx(n.x+n.ix)}" cy="${sy(n.y+n.iy)}" r="4" fill="#fff" stroke="var(--accent)" stroke-width="1.4" style="pointer-events:all;cursor:move"/>`;
           if(n.ox||n.oy)h+=`<line x1="${sx(n.x)}" y1="${sy(n.y)}" x2="${sx(n.x+n.ox)}" y2="${sy(n.y+n.oy)}" stroke="var(--accent)" stroke-width="1" style="pointer-events:none"/><circle data-vh="${ci}:${ni}:o" cx="${sx(n.x+n.ox)}" cy="${sy(n.y+n.oy)}" r="4" fill="#fff" stroke="var(--accent)" stroke-width="1.4" style="pointer-events:all;cursor:move"/>`;
         }
-        h+=`<rect data-vn="${ci}:${ni}" x="${sx(n.x)-4}" y="${sy(n.y)-4}" width="8" height="8" rx="${n.sm?4:1}" fill="${on?'var(--accent)':'#fff'}" stroke="var(--accent)" stroke-width="1.4" style="pointer-events:all;cursor:move"/>`;
+        h+=`<rect data-vn="${ci}:${ni}" x="${sx(n.x)-4}" y="${sy(n.y)-4}" width="8" height="8" rx="${n.sm?4:1}" fill="${picked?'var(--accent)':'#fff'}" stroke="var(--accent)" stroke-width="1.4" style="pointer-events:all;cursor:move"/>`;
       });
     });
   }
@@ -1971,15 +1974,25 @@ function veditDown(e,p,ds){
   if(ds.vh){const [c,i,w]=ds.vh.split(':');drag={type:'vhandle',c:+c,i:+i,w,o,pushed:false};return true}
   if(ds.vn){
     const [c,i]=ds.vn.split(':').map(Number);
+    const has=vedit.multi.some(q=>q.c===c&&q.i===i);
+    if(e.shiftKey){
+      vedit.multi=has?vedit.multi.filter(q=>!(q.c===c&&q.i===i)):[...vedit.multi,{c,i}];
+      vedit.sel=has?(vedit.multi[vedit.multi.length-1]||null):{c,i};
+      render({noLayers:true});return true;
+    }
+    if(!has)vedit.multi=[{c,i}];
     vedit.sel={c,i};
-    drag={type:'vnode',c,i,o,pushed:false,sxp:e.clientX,syp:e.clientY};
+    const l0=localOf(o,p);
+    drag={type:'vnode',c,i,o,pushed:false,sxp:e.clientX,syp:e.clientY,l0,
+      group:vedit.multi.map(q=>{const nd=o.pc[q.c]&&o.pc[q.c].n[q.i];return nd?{nd,x:nd.x,y:nd.y}:null}).filter(Boolean)};
     render({noLayers:true});return true;
   }
   const h=nearestSegment(o,p);
   if(h&&h.dist<=7/view.z){
     pushHistory();insertNode(o,h);
-    vedit.sel={c:h.c,i:h.i+1};
-    drag={type:'vnode',c:h.c,i:h.i+1,o,pushed:true,sxp:e.clientX,syp:e.clientY};
+    vedit.sel={c:h.c,i:h.i+1};vedit.multi=[{c:h.c,i:h.i+1}];
+    const nd=o.pc[h.c].n[h.i+1];
+    drag={type:'vnode',c:h.c,i:h.i+1,o,pushed:true,sxp:e.clientX,syp:e.clientY,l0:localOf(o,p),group:[{nd,x:nd.x,y:nd.y}]};
     render({noLayers:true});return true;
   }
   exitVedit();
@@ -2099,7 +2112,7 @@ function onMove(e){
     return;
   }
   if(!drag){
-    if(tool==='pen'&&pen){pen.hoverPt=p;drawOverlay();return}
+    if(tool==='pen'&&pen){pen.hoverPt=e.shiftKey&&pen.nodes.length?penConstrain(pen.nodes[pen.nodes.length-1],p):p;drawOverlay();return}
     if((tool==='select'||tool==='scale')&&!spaceDown){
       const ds=(e.target&&e.target.dataset)||{};
       const h=(ds.h||ds.lbl||ds.rot||ds.vn||ds.vh)?null:hit(p);
@@ -2385,9 +2398,14 @@ function doPinch(){
 }
 
 /* ---------- bút vẽ, bút chì, sửa nút ---------- */
+function penConstrain(prev,p){
+  const dx=p.x-prev.x,dy=p.y-prev.y,a=Math.round(Math.atan2(dy,dx)/(Math.PI/4))*(Math.PI/4),len=Math.hypot(dx,dy)*Math.cos(Math.atan2(dy,dx)-a);
+  return {x:prev.x+Math.cos(a)*len,y:prev.y+Math.sin(a)*len};
+}
 function penDownAt(e,p){
   let q=p;
-  if(snapActive(e)){const s=snapPt(p,allSnapT());q={x:s.x,y:s.y}}
+  if(e.shiftKey&&pen&&pen.nodes.length)q=penConstrain(pen.nodes[pen.nodes.length-1],p);
+  else if(snapActive(e)){const s=snapPt(p,allSnapT());q={x:s.x,y:s.y}}
   if(!pen)pen={nodes:[],closed:false,hoverPt:null};
   if(pen.nodes.length>=2){
     const f=pen.nodes[0];
@@ -2438,7 +2456,7 @@ function enterVedit(o){
   if(['frame','image','text','inst'].includes(o.type)){toast('Loại đối tượng này không sửa nút được');return}
   pushHistory();
   if(o.type!=='path')convertToPath(o);
-  vedit={id:o.id,sel:null};
+  vedit={id:o.id,sel:null,multi:[]};
   render();
   toast('Sửa nút: kéo nút hoặc tay cầm, nhấp lên đường để thêm nút, Delete để xoá nút, Enter hoặc Esc để thoát');
 }
@@ -2451,7 +2469,9 @@ function exitVedit(){
 function convertToPath(o){
   const cs=shapeContours(o),bb=contoursBBox(cs);
   o.type='path';o.rot=0;o.x=bb.x;o.y=bb.y;o.w=bb.w;o.h=bb.h;o.pw=bb.w;o.ph=bb.h;
-  o.pc=cs.map(c=>({c:c.c,n:c.n.map(q=>({x:q.x-bb.x,y:q.y-bb.y,ix:q.ix,iy:q.iy,ox:q.ox,oy:q.oy,sm:false}))}));
+  // nút có hai tay cầm thẳng hàng, ngược chiều (hình tròn, góc bo) là nút cong mượt
+  const smooth=q=>{const a=Math.hypot(q.ix,q.iy),b=Math.hypot(q.ox,q.oy);return a>1e-6&&b>1e-6&&Math.abs(q.ix*q.oy-q.iy*q.ox)<1e-3*a*b&&(q.ix*q.ox+q.iy*q.oy)<0};
+  o.pc=cs.map(c=>({c:c.c,n:c.n.map(q=>({x:q.x-bb.x,y:q.y-bb.y,ix:q.ix,iy:q.iy,ox:q.ox,oy:q.oy,sm:smooth(q)}))}));
   o.r=0;o.rr=null;o.flip=false;
 }
 const localOf=(o,p)=>{
@@ -2502,7 +2522,10 @@ function moveVector(e,p){
     pushHistory();d.pushed=true;
   }
   const l=localOf(o,p),node=o.pc[d.c].n[d.i];
-  if(d.type==='vnode'){node.x=l.x;node.y=l.y}
+  if(d.type==='vnode'){
+    const dx=l.x-d.l0.x,dy=l.y-d.l0.y;
+    (d.group&&d.group.length?d.group:[{nd:node,x:node.x,y:node.y}]).forEach(g=>{g.nd.x=g.x+dx;g.nd.y=g.y+dy});
+  }
   else{
     const dx=l.x-node.x,dy=l.y-node.y;
     if(d.w==='o'){node.ox=dx;node.oy=dy;if(node.sm&&!e.altKey){node.ix=-dx;node.iy=-dy}else if(e.altKey)node.sm=false}
@@ -2516,20 +2539,31 @@ function toggleSmooth(key){
   pushHistory();
   if(node.ix||node.iy||node.ox||node.oy){node.ix=node.iy=node.ox=node.oy=0;node.sm=false}
   else{
-    const prev=n[(ni-1+n.length)%n.length],next=n[(ni+1)%n.length];
-    const tx=(next.x-prev.x)/6,ty=(next.y-prev.y)/6;
+    // đường hở: nút đầu/cuối không có nút kề bên kia, dùng chính nó làm điểm tựa
+    const prev=c.c||ni>0?n[(ni-1+n.length)%n.length]:node,next=c.c||ni<n.length-1?n[(ni+1)%n.length]:node;
+    const tx=(next.x-prev.x)/(prev===node||next===node?3:6),ty=(next.y-prev.y)/(prev===node||next===node?3:6);
     node.ox=tx;node.oy=ty;node.ix=-tx;node.iy=-ty;node.sm=true;
   }
   render({noLayers:true});
 }
 function deleteVNode(){
-  const o=vedit&&byId(vedit.id);if(!o||!vedit.sel)return;
-  const {c,i}=vedit.sel;pushHistory();
-  const cn=o.pc[c];cn.n.splice(i,1);
-  if(cn.n.length<2)o.pc.splice(c,1);
-  vedit.sel=null;
+  const o=vedit&&byId(vedit.id);if(!o)return;
+  const list=vedit.multi.length?vedit.multi:(vedit.sel?[vedit.sel]:[]);
+  if(!list.length)return;
+  pushHistory();
+  // xoá từ cuối lên để chỉ số không lệch
+  [...list].sort((a,b)=>b.c-a.c||b.i-a.i).forEach(({c,i})=>{const cn=o.pc[c];if(cn)cn.n.splice(i,1)});
+  for(let c=o.pc.length-1;c>=0;c--)if(o.pc[c].n.length<2)o.pc.splice(c,1);
+  vedit.sel=null;vedit.multi=[];
   if(!o.pc.length){objs=objs.filter(x=>x!==o);vedit=null;sel=new Set()}
   render();
+}
+/* nhích các nút đang chọn theo toạ độ thế giới */
+function nudgeVNodes(dx,dy){
+  const o=vedit&&byId(vedit.id);if(!o||!vedit.multi.length)return false;
+  const sxx=o.pw?o.w/o.pw:1,syy=o.ph?o.h/o.ph:1;
+  vedit.multi.forEach(({c,i})=>{const nd=o.pc[c]&&o.pc[c].n[i];if(nd){nd.x+=dx/sxx;nd.y+=dy/syy}});
+  render({noLayers:true});return true;
 }
 
 /* ---------- sửa văn bản (có định dạng riêng từng đoạn) ---------- */
@@ -5023,6 +5057,7 @@ window.addEventListener('keydown',e=>{
     if(e.shiftKey&&code==='KeyC'){e.preventDefault();copyPngOf(selObjs(),2);return}
     if(k==='s'&&!e.shiftKey){e.preventDefault();if(canSave())saveDocFile();else toast('Bản vẽ được tự lưu trong trình duyệt.');return}
     if(k==='o'&&!e.shiftKey){e.preventDefault();$('#docIn').click();return}
+    if(k==='z'&&pen&&!e.shiftKey){e.preventDefault();pen.nodes.pop();if(!pen.nodes.length)pen=null;drawOverlay();return}
     if(k==='z'){e.preventDefault();e.shiftKey?doRedo():doUndo()}
     else if(k==='y'){e.preventDefault();doRedo()}
     else if(k==='a'){e.preventDefault();const hid=hiddenIds();sel=new Set(objs.filter(o=>!hid.has(o.id)&&!o.locked&&!o.parent).map(o=>o.id));render()}
@@ -5085,6 +5120,12 @@ window.addEventListener('keydown',e=>{
     return;
   }
   const arrows={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,-1],ArrowDown:[0,1]};
+  if(arrows[e.key]&&vedit){
+    e.preventDefault();
+    const st=e.shiftKey?10:1;
+    if(vedit.multi&&vedit.multi.length){if(!e.repeat)pushHistory();nudgeVNodes(arrows[e.key][0]*st,arrows[e.key][1]*st)}
+    return;
+  }
   if(arrows[e.key]){
     // con trong auto layout: mũi tên đổi thứ tự thay vì nhích
     const S1=selObjs();
