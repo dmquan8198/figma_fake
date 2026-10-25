@@ -198,7 +198,9 @@ pre.css{margin:0;background:var(--input);border-radius:8px;padding:10px;font:11.
 #pres .pf{position:absolute;inset:0;transition:transform .35s ease,opacity .35s ease}
 #pres .pf svg{display:block;width:100%;height:100%}
 #pres .hot{position:absolute;cursor:pointer;border-radius:4px}
-#pres.hint .hot{outline:2px solid rgba(255,90,60,.9);background:rgba(255,90,60,.12)}
+#pres.hint .hot,#pres.flash .hot{outline:2px solid rgba(255,90,60,.9);background:rgba(255,90,60,.12)}
+#pres.flash .hot{animation:hotflash .7s ease-out forwards}
+@keyframes hotflash{from{opacity:1}to{opacity:0}}
 
 @media (max-width:860px){
   main{grid-template-columns:minmax(0,1fr)}
@@ -217,6 +219,9 @@ pre.css{margin:0;background:var(--input);border-radius:8px;padding:10px;font:11.
   #tools::-webkit-scrollbar{display:none}
   #tools .tb{width:42px;height:42px}
   main{padding-bottom:54px}
+  #pres .pbar{flex-wrap:wrap;gap:6px;padding:8px}
+  #pres .pbar b{flex:1 0 100%}
+  #pres .pbar button{flex:1 1 0;padding:0 6px;white-space:nowrap;font-size:11.5px}
   aside{bottom:54px}
 }
 @media (prefers-reduced-motion:reduce){aside{transition:none}#pres .pf{transition:none}}
@@ -404,6 +409,9 @@ const TYPE_IC={frame:'frame',rect:'rect',ellipse:'ellipse',line:'line',arrow:'ar
 const iconFor=o=>o.type==='frame'&&o.comp?'comp':(o.type==='frame'&&o.sec?'section':TYPE_IC[o.type]);
 const typeLabel=o=>o.type==='frame'&&o.comp?'Component':(o.type==='frame'&&o.sec?'Section':TYPE_NAME[o.type]);
 const isLineLike=o=>o.type==='line'||o.type==='arrow';
+/* màn hình của nguyên mẫu: frame cấp ngoài cùng, hoặc frame nằm thẳng trong một Section */
+const isScreen=o=>{if(!o||o.type!=='frame'||o.sec)return false;if(!o.parent)return true;const p=byId(o.parent);return !p||!!p.sec};
+const screenOf=o=>{let q=o,n=0;while(q&&n++<60){if(isScreen(q))return q;q=q.parent?byId(q.parent):null}return null};
 
 const cv=$('#cv'), world=$('#world'), ov=$('#ov'), te=$('#te'), stage=$('#stage');
 const left=$('#left'), right=$('#right');
@@ -907,6 +915,8 @@ function fixOrder(){
       if(!ok){o.parent=p.parent||null;o.slot=null}
     }else if(o.slot&&!(p&&p.type==='inst'))o.slot=null;
   });
+  // tương tác trỏ tới frame đã bị xoá thì gỡ (hoàn tác sẽ trả lại cả hai)
+  objs.forEach(o=>{if(o.link&&o.link.to&&o.link.to!=='back'&&!ids.has(o.link.to))o.link=null});
   objs.forEach(o=>{
     if(o.parent&&!ids.has(o.parent))o.parent=null;
     if(o.parent){if(!kids.has(o.parent))kids.set(o.parent,[]);kids.get(o.parent).push(o)}
@@ -3256,10 +3266,10 @@ function ovRows(o,m){
 
 /* ---- tab Nguyên mẫu ---- */
 function protoPanel(S){
-  const frames=objs.filter(f=>f.type==='frame'&&!f.parent);
+  const frames=objs.filter(isScreen);
   const pg=curPage();
   let h='';
-  h+=`<div class="sec nb"><h4>Điểm bắt đầu</h4>${sel1('startframe',pg.start||'',[['','Frame đầu tiên'],...frames.map(f=>[f.id,layerName(f)])])}<button class="btn full gap8" data-act="present">${ic('play',14)}Trình chiếu (Ctrl+Alt+Enter)</button></div>`;
+  h+=`<div class="sec nb"><h4>Điểm bắt đầu</h4>${sel1('startframe',(pg.start&&byId(pg.start))?pg.start:'',[['','Frame đầu tiên'],...frames.map(f=>[f.id,layerName(f)])])}<button class="btn full gap8" data-act="present">${ic('play',14)}Trình chiếu (Ctrl+Alt+Enter)</button></div>`;
   if(S.length!==1){
     h+=`<div class="sec"><p class="note" style="border-color:var(--comp)">Chọn một nút, hình hoặc khung để thêm tương tác. Khi bạn nhấp vào nó lúc trình chiếu, màn hình sẽ chuyển sang frame đích.</p></div>`;
     return h;
@@ -3272,7 +3282,7 @@ function protoPanel(S){
     h+=`<div class="rowlbl">Hiệu ứng chuyển</div>${sel1('lk.anim',L.anim||'instant',[['instant','Tức thì'],['dissolve','Mờ dần'],['slide-l','Trượt sang trái'],['slide-r','Trượt sang phải'],['slide-u','Trượt lên'],['slide-d','Trượt xuống']])}`;
   }
   h+='</div>';
-  if(o.type==='frame'&&!o.parent)h+=`<div class="sec"><button class="btn full${pg.start===o.id?' on':''}" data-act="setstart">${pg.start===o.id?'Đang là điểm bắt đầu':'Đặt làm điểm bắt đầu'}</button></div>`;
+  if(isScreen(o))h+=`<div class="sec"><button class="btn full${pg.start===o.id?' on':''}" data-act="setstart">${pg.start===o.id?'Đang là điểm bắt đầu':'Đặt làm điểm bắt đầu'}</button></div>`;
   return h;
 }
 
@@ -3884,7 +3894,9 @@ right.addEventListener('input',e=>{
   }
   const k=t.dataset.k;if(!k||/^(vps|vm|cpb):/.test(k))return;
   const S=selObjs();if(!S.length)return;
-  if(!panelDirty){pushHistory();panelDirty=true}
+  // ô chọn và ô tích là một quyết định riêng; ô gõ, kéo số, bảng màu thì gộp thành một bước
+  if(t.tagName==='SELECT'||t.type==='checkbox'){pushHistory();panelDirty=false}
+  else if(!panelDirty){pushHistory();panelDirty=true}
   const r=applyField(k,t.type==='checkbox'?(t.checked?'1':''):t.value,t,S);
   render(r==='full'?{}:{noPanel:true});
 });
@@ -4291,9 +4303,10 @@ function frameSvg(f){
 }
 function startPresent(){
   endAllModes();
-  const frames=objs.filter(f=>f.type==='frame'&&!f.parent&&!f.hidden);
+  const frames=objs.filter(f=>isScreen(f)&&!f.hidden);
   if(!frames.length){toast('Chưa có Frame nào để trình chiếu. Hãy vẽ một Frame trước.');return}
-  const selF=selObjs().find(o=>o.type==='frame'&&!o.parent);
+  // bắt đầu từ màn hình chứa lớp đang chọn, nếu có
+  const selF=selObjs().map(screenOf).find(f=>f&&!f.hidden);
   const st=selF||(curPage().start&&byId(curPage().start))||frames[0];
   pres={stack:[st.id],hint:false,busy:false};
   $('#pres').hidden=false;$('#pres').classList.remove('hint');
@@ -4314,15 +4327,32 @@ function presShow(fid,anim){
   const el=document.createElement('div');
   el.className='pf';
   el.innerHTML=frameSvg(f);
-  withChildren([f]).forEach(o=>{
-    if(!o.link||!o.link.to||o.hidden)return;
-    const b=aabb(o),hs=document.createElement('div');
+  const hid=hiddenIds();
+  const addHot=(b,link)=>{
+    const hs=document.createElement('div');
     hs.className='hot';
     hs.style.cssText=`left:${(b.x-f.x)*k}px;top:${(b.y-f.y)*k}px;width:${b.w*k}px;height:${b.h*k}px`;
     hs.title='Nhấp để chuyển màn hình';
-    hs.addEventListener('click',()=>presGo(o.link));
+    hs.addEventListener('click',ev=>{ev.stopPropagation();presGo(link)});
     el.appendChild(hs);
+  };
+  // tương tác đặt bên trong component gốc: dùng được trên từng bản sao (lớp con nằm trên, được ưu tiên)
+  const instHots=(inst,ox,oy,depth)=>{
+    if(depth>3)return;
+    const r=instLayout(inst);
+    r.list.forEach((q,j)=>{
+      if(j===0||q.hidden)return;
+      if(q.link&&q.link.to&&(q.link.to==='back'||byId(q.link.to)))addHot({x:ox+q.x,y:oy+q.y,w:q.w,h:q.h},q.link);
+      if(q.type==='inst')instHots(q,ox+q.x,oy+q.y,depth+1);
+    });
+  };
+  withChildren([f]).forEach(o=>{
+    if(hid.has(o.id))return;
+    if(o.link&&o.link.to&&(o.link.to==='back'||byId(o.link.to)))addHot(aabb(o),o.link);
+    if(o.type==='inst')instHots(o,o.x,o.y,0);
   });
+  // bấm trượt: chớp sáng các vùng bấm được để gợi ý
+  el.addEventListener('click',()=>{const p=$('#pres');p.classList.remove('flash');void p.offsetWidth;p.classList.add('flash');clearTimeout(presShow.ft);presShow.ft=setTimeout(()=>p.classList.remove('flash'),700)});
   const old=wr.querySelector('.pf');
   if(!old||anim==='instant'){wr.innerHTML='';wr.appendChild(el);return}
   const from={dissolve:'opacity:0','slide-l':'transform:translateX(100%)','slide-r':'transform:translateX(-100%)','slide-u':'transform:translateY(100%)','slide-d':'transform:translateY(-100%)'}[anim]||'';
